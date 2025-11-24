@@ -4,6 +4,7 @@ Module for converting various file formats to PDF.
 Supports:
 - Office documents (Word, Excel, PowerPoint) via COM automation
 - Images via Pillow
+- HTML via wkhtmltopdf
 - PDF pass-through (no-op)
 
 This module only works with local files and has no Azure/blob storage dependencies.
@@ -11,6 +12,7 @@ This module only works with local files and has no Azure/blob storage dependenci
 
 import os
 import pathlib
+import subprocess
 import tempfile
 from typing import Optional
 
@@ -25,10 +27,11 @@ WORD_EXTENSIONS = {'.doc', '.docx', '.rtf', '.odt'}
 EXCEL_EXTENSIONS = {'.xls', '.xlsx', '.ods'}
 PPT_EXTENSIONS = {'.ppt', '.pptx', '.odp'}
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}
+HTML_EXTENSIONS = {'.html', '.htm'}
 
 ALL_SUPPORTED_EXTENSIONS = (
     PDF_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | 
-    PPT_EXTENSIONS | IMAGE_EXTENSIONS
+    PPT_EXTENSIONS | IMAGE_EXTENSIONS | HTML_EXTENSIONS
 )
 
 
@@ -325,6 +328,83 @@ def _handle_pdf(
     return dst_path
 
 
+def _convert_html_to_pdf(
+    src_path: pathlib.Path,
+    dst_dir: pathlib.Path,
+    attach_original: bool
+) -> pathlib.Path:
+    """Convert HTML to PDF using wkhtmltopdf."""
+    dst_path = dst_dir / f"{src_path.stem}.pdf"
+    
+    # Try to find wkhtmltopdf
+    wkhtmltopdf_paths = [
+        "wkhtmltopdf",  # In PATH
+        r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe",
+        r"C:\Program Files (x86)\wkhtmltopdf\bin\wkhtmltopdf.exe",
+    ]
+    
+    wkhtmltopdf_exe = None
+    for path in wkhtmltopdf_paths:
+        try:
+            # Test if executable exists and works
+            result = subprocess.run(
+                [path, "--version"],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                wkhtmltopdf_exe = path
+                break
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    
+    if not wkhtmltopdf_exe:
+        raise RuntimeError(
+            "wkhtmltopdf not found. Please install from https://wkhtmltopdf.org/ "
+            "or ensure it's in your PATH"
+        )
+    
+    # Convert HTML to PDF
+    # Use flags to avoid printer dialog and other UI interactions
+    # The key is to avoid any print-related operations that might trigger Windows printer dialogs
+    try:
+        # Set up environment to avoid printer interactions
+        env = os.environ.copy()
+        env['QT_QPA_PLATFORM'] = 'offscreen'  # Use offscreen rendering
+        
+        result = subprocess.run(
+            [
+                wkhtmltopdf_exe,
+                "--enable-local-file-access",  # Allow local files
+                "--no-stop-slow-scripts",       # Don't prompt for slow scripts
+                "--disable-smart-shrinking",    # Disable smart shrinking (reduces printer access)
+                "--quiet",                       # Minimal output
+                str(src_path),
+                str(dst_path)
+            ],
+            capture_output=True,
+            timeout=60,
+            text=True,
+            env=env,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0  # No window on Windows
+        )
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"wkhtmltopdf conversion failed: {result.stderr}")
+        
+        if not dst_path.exists():
+            raise RuntimeError("wkhtmltopdf did not create output file")
+    
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("wkhtmltopdf conversion timed out after 60 seconds")
+    
+    # Attach original if requested
+    if attach_original:
+        attach_original_to_pdf(dst_path, src_path)
+    
+    return dst_path
+
+
 def convert_anything_to_pdf(
     src_path: pathlib.Path,
     dst_dir: pathlib.Path,
@@ -375,6 +455,9 @@ def convert_anything_to_pdf(
     
     elif ext in IMAGE_EXTENSIONS:
         return _convert_image_to_pdf(src_path, dst_dir, attach_original)
+    
+    elif ext in HTML_EXTENSIONS:
+        return _convert_html_to_pdf(src_path, dst_dir, attach_original)
     
     else:
         raise ValueError(

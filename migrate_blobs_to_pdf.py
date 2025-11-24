@@ -13,10 +13,11 @@ import argparse
 import os
 import pathlib
 import tempfile
+from collections import defaultdict
 from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
-from any2pdf import convert_anything_to_pdf
+from any2pdf import convert_anything_to_pdf, ALL_SUPPORTED_EXTENSIONS
 
 
 # ============================================================================
@@ -55,6 +56,11 @@ def main():
         default=None,
         help="Maximum number of files to process (useful for testing, default: process all)"
     )
+    parser.add_argument(
+        "--analyse",
+        action="store_true",
+        help="Analyse file extensions and show what's supported (doesn't process files)"
+    )
     args = parser.parse_args()
     
     # Authenticate with Azure AD
@@ -66,12 +72,58 @@ def main():
     
     container_client = blob_service.get_container_client(CONTAINER_NAME)
     
+    # If analysis mode, just report extensions and exit
+    if args.analyse:
+        print("Analysing file extensions in source...")
+        extension_stats = defaultdict(int)
+        unsupported_files = []
+        total_files = 0
+        
+        blobs = container_client.list_blobs(name_starts_with=INPUT_PREFIX)
+        
+        for blob in blobs:
+            if blob.name.endswith("/"):
+                continue
+            
+            total_files += 1
+            ext = pathlib.Path(blob.name).suffix.lower()
+            extension_stats[ext] += 1
+            
+            if ext not in ALL_SUPPORTED_EXTENSIONS:
+                unsupported_files.append(blob.name)
+        
+        # Report findings
+        supported_count = total_files - len(unsupported_files)
+        print(f"Found {total_files} files ({supported_count} supported, {len(unsupported_files)} unsupported):")
+        
+        # Show supported extensions
+        print("Supported extensions:")
+        for ext, count in sorted(extension_stats.items()):
+            if ext in ALL_SUPPORTED_EXTENSIONS:
+                print(f"  {ext or '(no extension)'}: {count} file(s)")
+        
+        # Show unsupported extensions
+        unsupported_extensions = {ext: count for ext, count in extension_stats.items() if ext not in ALL_SUPPORTED_EXTENSIONS}
+        if unsupported_extensions:
+            print("Unsupported extensions:")
+            for ext, count in sorted(unsupported_extensions.items()):
+                print(f"  {ext or '(no extension)'}: {count} file(s)")
+        
+        if unsupported_files:
+            print(f"WARNING: {len(unsupported_files)} unsupported file(s) will be skipped:")
+            for fname in unsupported_files[:10]:  # Show first 10
+                print(f"  - {fname}")
+            if len(unsupported_files) > 10:
+                print(f"  ... and {len(unsupported_files) - 10} more")
+        
+        return
+    
+    # List all blobs for processing
+    blobs = list(container_client.list_blobs(name_starts_with=INPUT_PREFIX))
+    
     # Create temporary directory for downloads and conversions
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = pathlib.Path(tmpdir)
-        
-        # List all blobs under INPUT_PREFIX
-        blobs = container_client.list_blobs(name_starts_with=INPUT_PREFIX)
         
         processed_count = 0
         
@@ -87,9 +139,19 @@ def main():
             
             # Determine local and target names
             local_name = pathlib.Path(blob.name).name
+            ext = pathlib.Path(blob.name).suffix.lower()
+            
+            # Skip unsupported file types
+            if ext not in ALL_SUPPORTED_EXTENSIONS:
+                print("SKIP", blob.name, "(unsupported extension)")
+                continue
+            
             local_path = tmpdir_path / local_name
-            stem = pathlib.Path(blob.name).stem
-            target_pdf_name = OUTPUT_PREFIX + stem + ".pdf"
+            
+            # Preserve directory structure: replace INPUT_PREFIX with OUTPUT_PREFIX
+            relative_path = blob.name[len(INPUT_PREFIX):]  # Remove INPUT_PREFIX
+            relative_path_obj = pathlib.Path(relative_path)
+            target_pdf_name = OUTPUT_PREFIX + str(relative_path_obj.with_suffix('.pdf'))
             
             # Check if output already exists (skip if not overwriting)
             if not OVERWRITE_OUTPUT:
