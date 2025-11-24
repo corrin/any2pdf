@@ -13,6 +13,7 @@ This module only works with local files and has no Azure/blob storage dependenci
 
 import argparse
 import io
+import logging
 import os
 import pathlib
 import shutil
@@ -349,8 +350,7 @@ def _convert_html_to_pdf(
     """Convert HTML to PDF using Microsoft Edge headless."""
     dst_path = dst_dir / f"{src_path.stem}.pdf"
     
-    # Edge is typically not in PATH, use standard installation location
-    edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    logger = logging.getLogger(__name__)
     
     # Convert HTML to PDF using Edge headless with temporary user data directory
     temp_user_data = None
@@ -359,7 +359,7 @@ def _convert_html_to_pdf(
         temp_user_data = tempfile.mkdtemp(prefix="edge_temp_")
         
         cmd = [
-            edge,
+            EDGE_PATH,
             "--headless=new",  # Use new headless mode
             "--disable-gpu",
             "--disable-extensions",
@@ -378,11 +378,9 @@ def _convert_html_to_pdf(
         )
         
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Edge headless failed for {src_path}:\n"
-                f"STDOUT:\n{result.stdout.decode(errors='ignore')}\n"
-                f"STDERR:\n{result.stderr.decode(errors='ignore')}"
-            )
+            logger.debug(f"Edge STDOUT: {result.stdout.decode(errors='ignore')}")
+            logger.debug(f"Edge STDERR: {result.stderr.decode(errors='ignore')}")
+            raise RuntimeError(f"Edge headless failed for {src_path} with exit code {result.returncode}")
         
         if not dst_path.exists():
             raise RuntimeError("Edge headless did not create output file")
@@ -557,6 +555,13 @@ def convert_anything_to_pdf(
 
 def main():
     """Main CLI entry point."""
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(levelname)s: %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+    
     parser = argparse.ArgumentParser(
         description="Convert various file formats to PDF",
         epilog=f"Supported extensions: {', '.join(sorted(ALL_SUPPORTED_EXTENSIONS))}"
@@ -591,20 +596,21 @@ def main():
     
     # Validate input file exists
     if not args.input.exists():
-        print(f"Error: Input file does not exist: {args.input}", file=sys.stderr)
+        logger.error(f"Input file does not exist: {args.input}")
         return 1
     
     # Check if extension is supported
     if args.input.suffix.lower() not in ALL_SUPPORTED_EXTENSIONS:
-        print(f"Error: Unsupported file extension: {args.input.suffix}", file=sys.stderr)
-        print(f"Supported: {', '.join(sorted(ALL_SUPPORTED_EXTENSIONS))}", file=sys.stderr)
+        logger.error(f"Unsupported file extension: {args.input.suffix}")
+        logger.error(f"Supported: {', '.join(sorted(ALL_SUPPORTED_EXTENSIONS))}")
         return 1
     
     if args.verbose:
-        print(f"Input: {args.input}")
-        print(f"Output directory: {args.output_dir}")
-        print(f"Attach original: {not args.no_attach_original}")
-        print(f"File size: {args.input.stat().st_size:,} bytes")
+        logger.setLevel(logging.DEBUG)
+        logger.info(f"Input: {args.input}")
+        logger.info(f"Output directory: {args.output_dir}")
+        logger.info(f"Attach original: {not args.no_attach_original}")
+        logger.info(f"File size: {args.input.stat().st_size:,} bytes")
     
     try:
         result = convert_anything_to_pdf(
@@ -612,20 +618,19 @@ def main():
             dst_dir=args.output_dir,
             attach_original=not args.no_attach_original
         )
-        
+
+        logger.info("Success!")
+
         if args.verbose:
-            print(f"\nSuccess!")
-            print(f"PDF created: {result}")
-            print(f"PDF size: {result.stat().st_size:,} bytes")
-        else:
-            print(result)
+            logger.info(f"PDF created: {result}")
+            logger.info(f"PDF size: {result.stat().st_size:,} bytes")
         
         return 0
         
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error(f"{e}")
         if args.verbose:
-            traceback.print_exc()
+            logger.exception("Full traceback:")
         return 1
 
 
