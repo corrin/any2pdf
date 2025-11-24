@@ -4,7 +4,7 @@ Module for converting various file formats to PDF.
 Supports:
 - Office documents (Word, Excel, PowerPoint) via COM automation
 - Images via Pillow
-- HTML via wkhtmltopdf
+- HTML via Microsoft Edge headless
 - PDF pass-through (no-op)
 
 This module only works with local files and has no Azure/blob storage dependencies.
@@ -333,70 +333,58 @@ def _convert_html_to_pdf(
     dst_dir: pathlib.Path,
     attach_original: bool
 ) -> pathlib.Path:
-    """Convert HTML to PDF using wkhtmltopdf."""
+    """Convert HTML to PDF using Microsoft Edge headless."""
     dst_path = dst_dir / f"{src_path.stem}.pdf"
     
-    # Try to find wkhtmltopdf
-    wkhtmltopdf_paths = [
-        "wkhtmltopdf",  # In PATH
-        r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe",
-        r"C:\Program Files (x86)\wkhtmltopdf\bin\wkhtmltopdf.exe",
-    ]
+    # Edge is typically not in PATH, use standard installation location
+    edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
     
-    wkhtmltopdf_exe = None
-    for path in wkhtmltopdf_paths:
-        try:
-            # Test if executable exists and works
-            result = subprocess.run(
-                [path, "--version"],
-                capture_output=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                wkhtmltopdf_exe = path
-                break
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    
-    if not wkhtmltopdf_exe:
-        raise RuntimeError(
-            "wkhtmltopdf not found. Please install from https://wkhtmltopdf.org/ "
-            "or ensure it's in your PATH"
-        )
-    
-    # Convert HTML to PDF
-    # Use flags to avoid printer dialog and other UI interactions
-    # The key is to avoid any print-related operations that might trigger Windows printer dialogs
+    # Convert HTML to PDF using Edge headless with temporary user data directory
+    import shutil
+    temp_user_data = None
     try:
-        # Set up environment to avoid printer interactions
-        env = os.environ.copy()
-        env['QT_QPA_PLATFORM'] = 'offscreen'  # Use offscreen rendering
+        # Create a temporary user data directory
+        temp_user_data = tempfile.mkdtemp(prefix="edge_temp_")
+        
+        cmd = [
+            edge,
+            "--headless=new",  # Use new headless mode
+            "--disable-gpu",
+            "--disable-extensions",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            f"--user-data-dir={temp_user_data}",  # Use temp profile
+            f"--print-to-pdf={dst_path.resolve()}",
+            str(src_path.resolve()),
+        ]
         
         result = subprocess.run(
-            [
-                wkhtmltopdf_exe,
-                "--enable-local-file-access",  # Allow local files
-                "--no-stop-slow-scripts",       # Don't prompt for slow scripts
-                "--disable-smart-shrinking",    # Disable smart shrinking (reduces printer access)
-                "--quiet",                       # Minimal output
-                str(src_path),
-                str(dst_path)
-            ],
-            capture_output=True,
+            cmd, 
+            capture_output=True, 
             timeout=60,
-            text=True,
-            env=env,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0  # No window on Windows
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
         
         if result.returncode != 0:
-            raise RuntimeError(f"wkhtmltopdf conversion failed: {result.stderr}")
+            raise RuntimeError(
+                f"Edge headless failed for {src_path}:\n"
+                f"STDOUT:\n{result.stdout.decode(errors='ignore')}\n"
+                f"STDERR:\n{result.stderr.decode(errors='ignore')}"
+            )
         
         if not dst_path.exists():
-            raise RuntimeError("wkhtmltopdf did not create output file")
+            raise RuntimeError("Edge headless did not create output file")
     
     except subprocess.TimeoutExpired:
-        raise RuntimeError("wkhtmltopdf conversion timed out after 60 seconds")
+        raise RuntimeError("Edge headless conversion timed out after 60 seconds")
+    
+    finally:
+        # Clean up temporary user data directory
+        if temp_user_data and os.path.exists(temp_user_data):
+            try:
+                shutil.rmtree(temp_user_data, ignore_errors=True)
+            except:
+                pass  # Best effort cleanup
     
     # Attach original if requested
     if attach_original:
