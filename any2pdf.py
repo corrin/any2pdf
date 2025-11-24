@@ -11,30 +11,42 @@ Supports:
 This module only works with local files and has no Azure/blob storage dependencies.
 """
 
+import argparse
+import io
 import os
 import pathlib
+import shutil
 import subprocess
+import sys
 import tempfile
+import traceback
 from typing import Optional
 
 import win32com.client
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
 
 
 # Supported file extensions by category
 PDF_EXTENSIONS = {'.pdf'}
-WORD_EXTENSIONS = {'.doc', '.docx', '.rtf', '.odt'}
-EXCEL_EXTENSIONS = {'.xls', '.xlsx', '.ods'}
+WORD_EXTENSIONS = {'.doc', '.docx', '.rtf', '.odt', '.txt'}
+EXCEL_EXTENSIONS = {'.xls', '.xlsx', '.ods', '.csv', '.xlsm'}
 PPT_EXTENSIONS = {'.ppt', '.pptx', '.odp'}
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}
 HTML_EXTENSIONS = {'.html', '.htm'}
 MSG_EXTENSIONS = {'.msg'}
+ATTACHMENT_ONLY_EXTENSIONS = {'.mov', '.mp4'}  # Create dummy PDF with file attached
 
 ALL_SUPPORTED_EXTENSIONS = (
     PDF_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | 
-    PPT_EXTENSIONS | IMAGE_EXTENSIONS | HTML_EXTENSIONS | MSG_EXTENSIONS
+    PPT_EXTENSIONS | IMAGE_EXTENSIONS | HTML_EXTENSIONS | MSG_EXTENSIONS |
+    ATTACHMENT_ONLY_EXTENSIONS
 )
+
+# Edge is typically not in PATH, use standard installation location
+EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
 
 def get_password_for_file(path: pathlib.Path) -> Optional[str]:
@@ -320,7 +332,6 @@ def _handle_pdf(
         return src_path
     
     # Copy the PDF to the destination
-    import shutil
     shutil.copy2(src_path, dst_path)
     
     # Note: We don't attach_original for PDFs by default since the original
@@ -342,7 +353,6 @@ def _convert_html_to_pdf(
     edge = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
     
     # Convert HTML to PDF using Edge headless with temporary user data directory
-    import shutil
     temp_user_data = None
     try:
         # Create a temporary user data directory
@@ -444,6 +454,40 @@ def _convert_msg_to_pdf(
     return dst_path
 
 
+def _create_placeholder_pdf(
+    src_path: pathlib.Path,
+    dst_dir: pathlib.Path,
+    attach_original: bool
+) -> pathlib.Path:
+    """Create a placeholder PDF with the original file attached (for non-convertible files)."""
+    dst_path = dst_dir / f"{src_path.stem}.pdf"
+    
+    # Create a simple PDF with a placeholder message
+    # Create PDF content
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    
+    # Add text to the page
+    c.setFont("Helvetica", 12)
+    c.drawString(100, 750, f"Original file: {src_path.name}")
+    c.drawString(100, 730, f"File type: {src_path.suffix}")
+    c.drawString(100, 700, "This file type cannot be converted to PDF.")
+    c.drawString(100, 680, "The original file is attached to this PDF.")
+    
+    c.save()
+    
+    # Write the PDF
+    buffer.seek(0)
+    with open(dst_path, 'wb') as f:
+        f.write(buffer.read())
+    
+    # Attach original file
+    if attach_original:
+        attach_original_to_pdf(dst_path, src_path)
+    
+    return dst_path
+
+
 def convert_anything_to_pdf(
     src_path: pathlib.Path,
     dst_dir: pathlib.Path,
@@ -501,6 +545,9 @@ def convert_anything_to_pdf(
     elif ext in MSG_EXTENSIONS:
         return _convert_msg_to_pdf(src_path, dst_dir, attach_original)
     
+    elif ext in ATTACHMENT_ONLY_EXTENSIONS:
+        return _create_placeholder_pdf(src_path, dst_dir, attach_original)
+    
     else:
         raise ValueError(
             f"Unsupported file extension: '{ext}'. "
@@ -510,9 +557,6 @@ def convert_anything_to_pdf(
 
 def main():
     """Main CLI entry point."""
-    import argparse
-    import sys
-    
     parser = argparse.ArgumentParser(
         description="Convert various file formats to PDF",
         epilog=f"Supported extensions: {', '.join(sorted(ALL_SUPPORTED_EXTENSIONS))}"
@@ -581,11 +625,9 @@ def main():
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         if args.verbose:
-            import traceback
             traceback.print_exc()
         return 1
 
 
 if __name__ == '__main__':
-    import sys
     sys.exit(main())
