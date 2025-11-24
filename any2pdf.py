@@ -5,6 +5,7 @@ Supports:
 - Office documents (Word, Excel, PowerPoint) via COM automation
 - Images via Pillow
 - HTML via Microsoft Edge headless
+- Outlook messages (.msg) via Outlook COM + Edge headless
 - PDF pass-through (no-op)
 
 This module only works with local files and has no Azure/blob storage dependencies.
@@ -28,10 +29,11 @@ EXCEL_EXTENSIONS = {'.xls', '.xlsx', '.ods'}
 PPT_EXTENSIONS = {'.ppt', '.pptx', '.odp'}
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}
 HTML_EXTENSIONS = {'.html', '.htm'}
+MSG_EXTENSIONS = {'.msg'}
 
 ALL_SUPPORTED_EXTENSIONS = (
     PDF_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | 
-    PPT_EXTENSIONS | IMAGE_EXTENSIONS | HTML_EXTENSIONS
+    PPT_EXTENSIONS | IMAGE_EXTENSIONS | HTML_EXTENSIONS | MSG_EXTENSIONS
 )
 
 
@@ -393,6 +395,55 @@ def _convert_html_to_pdf(
     return dst_path
 
 
+def _convert_msg_to_pdf(
+    src_path: pathlib.Path,
+    dst_dir: pathlib.Path,
+    attach_original: bool
+) -> pathlib.Path:
+    """Convert Outlook .msg file to PDF via HTML."""
+    dst_path = dst_dir / f"{src_path.stem}.pdf"
+    
+    outlook = None
+    msg = None
+    temp_html = None
+    
+    try:
+        # Create Outlook application instance
+        outlook = win32com.client.DispatchEx("Outlook.Application")
+        namespace = outlook.GetNamespace("MAPI")
+        
+        # Open the .msg file
+        msg = namespace.OpenSharedItem(str(src_path.absolute()))
+        
+        # Save as HTML to temporary file
+        temp_html = dst_dir / f"{src_path.stem}_temp.html"
+        msg.SaveAs(str(temp_html.absolute()), 5)  # olHTML = 5
+        
+        # Convert the HTML to PDF using Edge (creates PDF with temp HTML name)
+        temp_pdf = _convert_html_to_pdf(temp_html, dst_dir, attach_original=False)
+        
+        # Rename the PDF to match the original .msg filename
+        if temp_pdf != dst_path:
+            os.replace(temp_pdf, dst_path)
+        
+    finally:
+        # Clean up
+        if msg:
+            msg.Close(0)  # olDiscard = 0
+        if outlook:
+            outlook.Quit()
+        
+        # Remove temporary HTML file
+        if temp_html and temp_html.exists():
+            temp_html.unlink()
+    
+    # Attach original .msg file
+    if attach_original:
+        attach_original_to_pdf(dst_path, src_path)
+    
+    return dst_path
+
+
 def convert_anything_to_pdf(
     src_path: pathlib.Path,
     dst_dir: pathlib.Path,
@@ -446,6 +497,9 @@ def convert_anything_to_pdf(
     
     elif ext in HTML_EXTENSIONS:
         return _convert_html_to_pdf(src_path, dst_dir, attach_original)
+    
+    elif ext in MSG_EXTENSIONS:
+        return _convert_msg_to_pdf(src_path, dst_dir, attach_original)
     
     else:
         raise ValueError(

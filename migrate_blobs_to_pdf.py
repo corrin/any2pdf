@@ -61,6 +61,12 @@ def main():
         action="store_true",
         help="Analyse file extensions and show what's supported (doesn't process files)"
     )
+    parser.add_argument(
+        "--filter-extension",
+        type=str,
+        default=None,
+        help="Only process files with this extension (e.g. '.msg' or '.docx')"
+    )
     args = parser.parse_args()
     
     # Authenticate with Azure AD
@@ -140,6 +146,10 @@ def main():
             # Determine local and target names
             local_name = pathlib.Path(blob.name).name
             ext = pathlib.Path(blob.name).suffix.lower()
+            
+            # Filter by extension if specified (do this first, silently)
+            if args.filter_extension and ext != args.filter_extension.lower():
+                continue
             
             # Skip unsupported file types
             if ext not in ALL_SUPPORTED_EXTENSIONS:
