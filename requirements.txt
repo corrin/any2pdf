@@ -1,6 +1,7 @@
 python-dotenv
 pywin32
 Pillow
+pillow-heif
 pypdf
 reportlab
 azure-identity

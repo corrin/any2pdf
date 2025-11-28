@@ -32,13 +32,13 @@ from reportlab.lib.pagesizes import letter
 
 # Supported file extensions by category
 PDF_EXTENSIONS = {'.pdf'}
-WORD_EXTENSIONS = {'.doc', '.docx', '.rtf', '.odt', '.txt'}
+WORD_EXTENSIONS = {'.doc', '.docx', '.rtf', '.odt', '.txt', '.dot'}
 EXCEL_EXTENSIONS = {'.xls', '.xlsx', '.ods', '.csv', '.xlsm'}
 PPT_EXTENSIONS = {'.ppt', '.pptx', '.odp'}
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.heic'}
 HTML_EXTENSIONS = {'.html', '.htm'}
 MSG_EXTENSIONS = {'.msg'}
-ATTACHMENT_ONLY_EXTENSIONS = {'.mov', '.mp4'}  # Create dummy PDF with file attached
+ATTACHMENT_ONLY_EXTENSIONS = {'.mov', '.mp4', '.m4a'}  # Create dummy PDF with file attached
 
 ALL_SUPPORTED_EXTENSIONS = (
     PDF_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | 
@@ -48,6 +48,9 @@ ALL_SUPPORTED_EXTENSIONS = (
 
 # Edge is typically not in PATH, use standard installation location
 EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+
+# Module-level logger
+logger = logging.getLogger(__name__)
 
 
 def get_password_for_file(path: pathlib.Path) -> Optional[str]:
@@ -350,8 +353,6 @@ def _convert_html_to_pdf(
     """Convert HTML to PDF using Microsoft Edge headless."""
     dst_path = dst_dir / f"{src_path.stem}.pdf"
     
-    logger = logging.getLogger(__name__)
-    
     # Convert HTML to PDF using Edge headless with temporary user data directory
     temp_user_data = None
     try:
@@ -547,10 +548,9 @@ def convert_anything_to_pdf(
         return _create_placeholder_pdf(src_path, dst_dir, attach_original)
     
     else:
-        raise ValueError(
-            f"Unsupported file extension: '{ext}'. "
-            f"Supported extensions are: {', '.join(sorted(ALL_SUPPORTED_EXTENSIONS))}"
-        )
+        # Fallback: create placeholder PDF with original attached for unsupported types
+        logger.warning(f"Unsupported file extension '{ext}' for {src_path.name}, creating placeholder PDF with attachment")
+        return _create_placeholder_pdf(src_path, dst_dir, attach_original)
 
 
 def main():
@@ -560,7 +560,6 @@ def main():
         level=logging.INFO,
         format='%(levelname)s: %(message)s'
     )
-    logger = logging.getLogger(__name__)
     
     parser = argparse.ArgumentParser(
         description="Convert various file formats to PDF",
