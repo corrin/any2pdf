@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import zipfile
 from email import policy
 from email.parser import BytesParser
 from typing import Optional
