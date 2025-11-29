@@ -12,12 +12,13 @@ Configuration is loaded from .env file.
 import argparse
 import os
 import pathlib
+import shutil
 import tempfile
 from collections import defaultdict
 from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
-from any2pdf import convert_anything_to_pdf, ALL_SUPPORTED_EXTENSIONS
+from any2pdf import convert_anything_to_pdf, ALL_SUPPORTED_EXTENSIONS, create_placeholder_pdf
 
 
 # ============================================================================
@@ -66,6 +67,12 @@ def main():
         type=str,
         default=None,
         help="Only process files with this extension (e.g. '.msg' or '.docx')"
+    )
+    parser.add_argument(
+        "--local-output",
+        type=pathlib.Path,
+        default=None,
+        help="Write PDFs to local directory instead of uploading to Azure (for testing)"
     )
     args = parser.parse_args()
     
@@ -151,11 +158,6 @@ def main():
             if args.filter_extension and ext != args.filter_extension.lower():
                 continue
             
-            # Skip unsupported file types
-            if ext not in ALL_SUPPORTED_EXTENSIONS:
-                print("SKIP", blob.name, "(unsupported extension)")
-                continue
-            
             local_path = tmpdir_path / local_name
             
             # Preserve directory structure: replace INPUT_PREFIX with OUTPUT_PREFIX
@@ -163,38 +165,54 @@ def main():
             relative_path_obj = pathlib.Path(relative_path)
             target_pdf_name = OUTPUT_PREFIX + str(relative_path_obj.with_suffix('.pdf'))
             
-            # Check if output already exists (skip if not overwriting)
-            if not OVERWRITE_OUTPUT:
-                out_client = container_client.get_blob_client(target_pdf_name)
-                if out_client.exists():
-                    print("SKIP", target_pdf_name)
-                    continue
-            
             try:
+                if args.local_output:
+                    # Local output mode - write to local directory
+                    local_output_dir = args.local_output / pathlib.Path(relative_path).parent
+                    local_output_dir.mkdir(parents=True, exist_ok=True)
+                    final_pdf_path = args.local_output / relative_path_obj.with_suffix('.pdf')
+                else:
+                    # Azure output mode - check if already exists
+                    out_client = container_client.get_blob_client(target_pdf_name)
+                    
+                    if not OVERWRITE_OUTPUT:
+                        try:
+                            out_client.get_blob_properties()
+                            print("SKIP", target_pdf_name, "(already exists)")
+                            continue
+                        except Exception:
+                            pass  # Blob doesn't exist, proceed
+                
                 # Download blob
                 downloader = container_client.download_blob(blob.name)
                 with open(local_path, "wb") as f:
                     f.write(downloader.readall())
                 
-                # Convert to PDF
-                pdf_path = convert_anything_to_pdf(
-                    local_path,
-                    dst_dir=tmpdir_path,
-                    attach_original=True
-                )
+                # Convert to PDF (fallback to placeholder on any error)
+                try:
+                    pdf_path = convert_anything_to_pdf(
+                        local_path,
+                        dst_dir=tmpdir_path,
+                        attach_original=True
+                    )
+                except Exception as e:
+                    print("FALLBACK", blob.name, ":", e)
+                    pdf_path = create_placeholder_pdf(local_path, tmpdir_path, attach_original=True)
                 
-                # Upload PDF
-                out_client = container_client.get_blob_client(target_pdf_name)
-                with open(pdf_path, "rb") as f:
-                    out_client.upload_blob(f, overwrite=OVERWRITE_OUTPUT)
+                # Upload PDF or save locally
+                if args.local_output:
+                    shutil.copy2(pdf_path, final_pdf_path)
+                    print("OK", blob.name, "->", final_pdf_path)
+                else:
+                    with open(pdf_path, "rb") as f:
+                        out_client.upload_blob(f, overwrite=OVERWRITE_OUTPUT)
+                    print("OK", blob.name, "->", target_pdf_name)
                 
-                print("OK", blob.name, "->", target_pdf_name)
                 processed_count += 1
                 
             except Exception as e:
                 print("ERROR", blob.name, ":", e)
                 processed_count += 1
-                continue
 
 
 if __name__ == "__main__":

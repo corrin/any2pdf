@@ -127,25 +127,14 @@ def _convert_word_to_pdf(
         
         # Get password if available
         password = get_password_for_file(src_path)
+        password_args = {'PasswordDocument': password} if password else {}
         
         # Open document
-        try:
-            if password:
-                doc = word.Documents.Open(
-                    str(src_path.absolute()),
-                    ReadOnly=True,
-                    PasswordDocument=password
-                )
-            else:
-                doc = word.Documents.Open(
-                    str(src_path.absolute()),
-                    ReadOnly=True
-                )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to open Word document '{src_path}'. "
-                f"It may be password-protected or corrupted: {e}"
-            )
+        doc = word.Documents.Open(
+            str(src_path.absolute()),
+            ReadOnly=True,
+            **password_args
+        )
         
         # Export to PDF (wdExportFormatPDF = 17)
         doc.ExportAsFixedFormat(
@@ -186,25 +175,14 @@ def _convert_excel_to_pdf(
         
         # Get password if available
         password = get_password_for_file(src_path)
+        password_args = {'Password': password} if password else {}
         
         # Open workbook
-        try:
-            if password:
-                workbook = excel.Workbooks.Open(
-                    str(src_path.absolute()),
-                    ReadOnly=True,
-                    Password=password
-                )
-            else:
-                workbook = excel.Workbooks.Open(
-                    str(src_path.absolute()),
-                    ReadOnly=True
-                )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to open Excel workbook '{src_path}'. "
-                f"It may be password-protected or corrupted: {e}"
-            )
+        workbook = excel.Workbooks.Open(
+            str(src_path.absolute()),
+            ReadOnly=True,
+            **password_args
+        )
         
         # Export to PDF (xlTypePDF = 0)
         workbook.ExportAsFixedFormat(
@@ -244,28 +222,15 @@ def _convert_ppt_to_pdf(
         
         # Get password if available
         password = get_password_for_file(src_path)
+        password_args = {'Password': password} if password else {}
         
         # Open presentation
-        try:
-            if password:
-                presentation = ppt.Presentations.Open(
-                    str(src_path.absolute()),
-                    ReadOnly=True,
-                    WithWindow=False,
-                    OpenAndRepair=False,
-                    Password=password
-                )
-            else:
-                presentation = ppt.Presentations.Open(
-                    str(src_path.absolute()),
-                    ReadOnly=True,
-                    WithWindow=False
-                )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to open PowerPoint presentation '{src_path}'. "
-                f"It may be password-protected or corrupted: {e}"
-            )
+        presentation = ppt.Presentations.Open(
+            str(src_path.absolute()),
+            ReadOnly=True,
+            WithWindow=False,
+            **password_args
+        )
         
         # Save as PDF (ppSaveAsPDF = 32)
         presentation.SaveAs(
@@ -386,16 +351,10 @@ def _convert_html_to_pdf(
         if not dst_path.exists():
             raise RuntimeError("Edge headless did not create output file")
     
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Edge headless conversion timed out after 60 seconds")
-    
     finally:
         # Clean up temporary user data directory
         if temp_user_data and os.path.exists(temp_user_data):
-            try:
-                shutil.rmtree(temp_user_data, ignore_errors=True)
-            except:
-                pass  # Best effort cleanup
+            shutil.rmtree(temp_user_data, ignore_errors=True)
     
     # Attach original if requested
     if attach_original:
@@ -453,7 +412,7 @@ def _convert_msg_to_pdf(
     return dst_path
 
 
-def _create_placeholder_pdf(
+def create_placeholder_pdf(
     src_path: pathlib.Path,
     dst_dir: pathlib.Path,
     attach_original: bool
@@ -545,12 +504,14 @@ def convert_anything_to_pdf(
         return _convert_msg_to_pdf(src_path, dst_dir, attach_original)
     
     elif ext in ATTACHMENT_ONLY_EXTENSIONS:
-        return _create_placeholder_pdf(src_path, dst_dir, attach_original)
+        return create_placeholder_pdf(src_path, dst_dir, attach_original)
     
     else:
-        # Fallback: create placeholder PDF with original attached for unsupported types
-        logger.warning(f"Unsupported file extension '{ext}' for {src_path.name}, creating placeholder PDF with attachment")
-        return _create_placeholder_pdf(src_path, dst_dir, attach_original)
+        # Unsupported file extension - raise error
+        raise ValueError(
+            f"Unsupported file extension: '{ext}'. "
+            f"Supported extensions are: {', '.join(sorted(ALL_SUPPORTED_EXTENSIONS))}"
+        )
 
 
 def main():
