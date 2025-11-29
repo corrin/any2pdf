@@ -12,6 +12,7 @@ This module only works with local files and has no Azure/blob storage dependenci
 """
 
 import argparse
+import html
 import io
 import logging
 import os
@@ -21,6 +22,8 @@ import subprocess
 import sys
 import tempfile
 import traceback
+from email import policy
+from email.parser import BytesParser
 from typing import Optional
 
 import win32com.client
@@ -38,12 +41,12 @@ PPT_EXTENSIONS = {'.ppt', '.pptx', '.odp'}
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.heic'}
 HTML_EXTENSIONS = {'.html', '.htm'}
 MSG_EXTENSIONS = {'.msg'}
-ATTACHMENT_ONLY_EXTENSIONS = {'.mov', '.mp4', '.m4a'}  # Create dummy PDF with file attached
+EML_EXTENSIONS = {'.eml'}
 
 ALL_SUPPORTED_EXTENSIONS = (
     PDF_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS | 
     PPT_EXTENSIONS | IMAGE_EXTENSIONS | HTML_EXTENSIONS | MSG_EXTENSIONS |
-    ATTACHMENT_ONLY_EXTENSIONS
+    EML_EXTENSIONS 
 )
 
 # Edge is typically not in PATH, use standard installation location
@@ -51,6 +54,28 @@ EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
 # Module-level logger
 logger = logging.getLogger(__name__)
+
+
+def get_category_for_extension(ext: str) -> str:
+    """Return the handler category for a file extension."""
+    ext = ext.lower()
+    if ext in PDF_EXTENSIONS:
+        return 'pdf'
+    if ext in WORD_EXTENSIONS:
+        return 'word'
+    if ext in EXCEL_EXTENSIONS:
+        return 'excel'
+    if ext in PPT_EXTENSIONS:
+        return 'ppt'
+    if ext in IMAGE_EXTENSIONS:
+        return 'image'
+    if ext in HTML_EXTENSIONS:
+        return 'html'
+    if ext in MSG_EXTENSIONS:
+        return 'msg'
+    if ext in EML_EXTENSIONS:
+        return 'eml'
+    return 'attachment'
 
 
 def get_password_for_file(path: pathlib.Path) -> Optional[str]:
@@ -363,6 +388,103 @@ def _convert_html_to_pdf(
     return dst_path
 
 
+def _convert_eml_to_pdf(
+    src_path: pathlib.Path,
+    dst_dir: pathlib.Path,
+    attach_original: bool
+) -> pathlib.Path:
+    """Convert .eml file to PDF via HTML."""
+    # Parse the .eml file
+    with open(src_path, 'rb') as f:
+        msg = BytesParser(policy=policy.default).parse(f)
+    
+    # Extract headers
+    from_header = msg.get('From', '')
+    to_header = msg.get('To', '')
+    subject_header = msg.get('Subject', '')
+    date_header = msg.get('Date', '')
+    
+    # Find body content - prefer HTML, fall back to plain text
+    body_content = None
+    is_html = False
+    
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            if content_type == 'text/html' and body_content is None:
+                body_content = part.get_content()
+                is_html = True
+                break
+        if body_content is None:
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                if content_type == 'text/plain':
+                    body_content = part.get_content()
+                    is_html = False
+                    break
+    else:
+        content_type = msg.get_content_type()
+        if content_type == 'text/html':
+            body_content = msg.get_content()
+            is_html = True
+        elif content_type == 'text/plain':
+            body_content = msg.get_content()
+            is_html = False
+    
+    if body_content is None:
+        raise ValueError(f"No text/html or text/plain body found in {src_path}")
+    
+    # Build HTML document
+    header_html = f"""<div style="font-family: Arial, sans-serif; border-bottom: 1px solid #ccc; padding-bottom: 10px; margin-bottom: 20px;">
+<p><strong>From:</strong> {html.escape(from_header)}</p>
+<p><strong>To:</strong> {html.escape(to_header)}</p>
+<p><strong>Subject:</strong> {html.escape(subject_header)}</p>
+<p><strong>Date:</strong> {html.escape(date_header)}</p>
+</div>"""
+    
+    if is_html:
+        body_html = body_content
+    else:
+        body_html = f"<pre>{html.escape(body_content)}</pre>"
+    
+    full_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>{html.escape(subject_header)}</title>
+</head>
+<body>
+{header_html}
+{body_html}
+</body>
+</html>"""
+    
+    # Write temporary HTML file
+    temp_html = dst_dir / f"{src_path.stem}_temp.html"
+    temp_html.write_text(full_html, encoding='utf-8')
+    
+    try:
+        # Convert HTML to PDF
+        pdf_path = _convert_html_to_pdf(temp_html, dst_dir, attach_original=False)
+        
+        # Rename to match original .eml filename
+        final_path = dst_dir / f"{src_path.stem}.pdf"
+        if pdf_path != final_path:
+            os.replace(pdf_path, final_path)
+        
+        # Attach original if requested
+        if attach_original:
+            attach_original_to_pdf(final_path, src_path)
+        
+        return final_path
+    finally:
+        # Clean up temp HTML file
+        try:
+            temp_html.unlink()
+        except OSError:
+            pass
+
+
 def _convert_msg_to_pdf(
     src_path: pathlib.Path,
     dst_dir: pathlib.Path,
@@ -503,8 +625,8 @@ def convert_anything_to_pdf(
     elif ext in MSG_EXTENSIONS:
         return _convert_msg_to_pdf(src_path, dst_dir, attach_original)
     
-    elif ext in ATTACHMENT_ONLY_EXTENSIONS:
-        return create_placeholder_pdf(src_path, dst_dir, attach_original)
+    elif ext in EML_EXTENSIONS:
+        return _convert_eml_to_pdf(src_path, dst_dir, attach_original)
     
     else:
         # Unsupported file extension - raise error

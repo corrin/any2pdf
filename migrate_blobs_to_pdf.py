@@ -10,6 +10,7 @@ Configuration is loaded from .env file.
 """
 
 import argparse
+import logging
 import os
 import pathlib
 import shutil
@@ -18,7 +19,10 @@ from collections import defaultdict
 from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
-from any2pdf import convert_anything_to_pdf, ALL_SUPPORTED_EXTENSIONS, create_placeholder_pdf
+from any2pdf import (
+    convert_anything_to_pdf, ALL_SUPPORTED_EXTENSIONS, create_placeholder_pdf,
+    get_category_for_extension
+)
 
 
 # ============================================================================
@@ -33,6 +37,36 @@ INPUT_PREFIX = os.getenv("INPUT_PREFIX")
 OUTPUT_PREFIX = os.getenv("OUTPUT_PREFIX")
 OVERWRITE_OUTPUT = os.getenv("OVERWRITE_OUTPUT", "False").lower() in ("true", "1", "yes")
 
+# Logging setup
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Console: show all
+console = logging.StreamHandler()
+console.setLevel(logging.DEBUG)
+console.setFormatter(logging.Formatter('%(message)s'))
+logger.addHandler(console)
+
+# File: warnings and errors only
+file_handler = logging.FileHandler('migration_issues.log', mode='w')
+file_handler.setLevel(logging.WARNING)
+file_handler.setFormatter(logging.Formatter('%(levelname)s %(message)s'))
+logger.addHandler(file_handler)
+
+
+def save_pdf(pdf_path, target_name, local_dir, container_client, category):
+    """Save PDF locally or upload to Azure. Returns destination for logging."""
+    if local_dir:
+        dest_dir = local_dir / category
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / (pathlib.Path(target_name).stem + '.pdf')
+        shutil.copy2(pdf_path, dest)
+        return dest
+    client = container_client.get_blob_client(target_name)
+    with open(pdf_path, "rb") as f:
+        client.upload_blob(f, overwrite=OVERWRITE_OUTPUT)
+    return target_name
+
 
 # ============================================================================
 # Main Logic
@@ -43,8 +77,8 @@ def main():
     
     # Validate configuration
     if not all([STORAGE_ACCOUNT_NAME, CONTAINER_NAME, INPUT_PREFIX, OUTPUT_PREFIX]):
-        print("ERROR: Missing required configuration in .env file")
-        print("Required: STORAGE_ACCOUNT_NAME, CONTAINER_NAME, INPUT_PREFIX, OUTPUT_PREFIX")
+        logger.error("Missing required configuration in .env file")
+        logger.error("Required: STORAGE_ACCOUNT_NAME, CONTAINER_NAME, INPUT_PREFIX, OUTPUT_PREFIX")
         return
     
     # Parse command-line arguments
@@ -67,6 +101,13 @@ def main():
         type=str,
         default=None,
         help="Only process files with this extension (e.g. '.msg' or '.docx')"
+    )
+    parser.add_argument(
+        "--test-all",
+        type=int,
+        metavar="N",
+        default=None,
+        help="Test mode: process N files of each supported extension type"
     )
     parser.add_argument(
         "--local-output",
@@ -134,6 +175,9 @@ def main():
     # List all blobs for processing
     blobs = list(container_client.list_blobs(name_starts_with=INPUT_PREFIX))
     
+    # Track counts per category
+    category_counts = defaultdict(int)
+    
     # Create temporary directory for downloads and conversions
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = pathlib.Path(tmpdir)
@@ -147,7 +191,7 @@ def main():
             
             # Check max files limit
             if args.max_files is not None and processed_count >= args.max_files:
-                print(f"Reached max files limit ({args.max_files}), stopping")
+                logger.info(f"Reached max files limit ({args.max_files}), stopping")
                 break
             
             # Determine local and target names
@@ -158,30 +202,30 @@ def main():
             if args.filter_extension and ext != args.filter_extension.lower():
                 continue
             
+            # Get category for this file type
+            category = get_category_for_extension(ext)
+            
+            # Test-all mode: skip if we've already processed N of this category
+            if args.test_all and category_counts[category] >= args.test_all:
+                continue
+            
+            category_counts[category] += 1
+            
             local_path = tmpdir_path / local_name
             
             # Preserve directory structure: replace INPUT_PREFIX with OUTPUT_PREFIX
-            relative_path = blob.name[len(INPUT_PREFIX):]  # Remove INPUT_PREFIX
-            relative_path_obj = pathlib.Path(relative_path)
-            target_pdf_name = OUTPUT_PREFIX + str(relative_path_obj.with_suffix('.pdf'))
+            relative_path = pathlib.Path(blob.name[len(INPUT_PREFIX):])
+            target_pdf_name = OUTPUT_PREFIX + str(relative_path.with_suffix('.pdf'))
             
             try:
-                if args.local_output:
-                    # Local output mode - write to local directory
-                    local_output_dir = args.local_output / pathlib.Path(relative_path).parent
-                    local_output_dir.mkdir(parents=True, exist_ok=True)
-                    final_pdf_path = args.local_output / relative_path_obj.with_suffix('.pdf')
-                else:
-                    # Azure output mode - check if already exists
-                    out_client = container_client.get_blob_client(target_pdf_name)
-                    
-                    if not OVERWRITE_OUTPUT:
-                        try:
-                            out_client.get_blob_properties()
-                            print("SKIP", target_pdf_name, "(already exists)")
-                            continue
-                        except Exception:
-                            pass  # Blob doesn't exist, proceed
+                # Skip if Azure target already exists
+                if not args.local_output and not OVERWRITE_OUTPUT:
+                    try:
+                        container_client.get_blob_client(target_pdf_name).get_blob_properties()
+                        logger.debug(f"SKIP {category} {category_counts[category]} {target_pdf_name} (already exists)")
+                        continue
+                    except Exception:
+                        pass  # Doesn't exist, proceed
                 
                 # Download blob
                 downloader = container_client.download_blob(blob.name)
@@ -189,6 +233,7 @@ def main():
                     f.write(downloader.readall())
                 
                 # Convert to PDF (fallback to placeholder on any error)
+                fallback = False
                 try:
                     pdf_path = convert_anything_to_pdf(
                         local_path,
@@ -196,22 +241,18 @@ def main():
                         attach_original=True
                     )
                 except Exception as e:
-                    print("FALLBACK", blob.name, ":", e)
+                    logger.warning(f"FALLBACK {blob.name} : {e}")
                     pdf_path = create_placeholder_pdf(local_path, tmpdir_path, attach_original=True)
+                    fallback = True
                 
-                # Upload PDF or save locally
-                if args.local_output:
-                    shutil.copy2(pdf_path, final_pdf_path)
-                    print("OK", blob.name, "->", final_pdf_path)
-                else:
-                    with open(pdf_path, "rb") as f:
-                        out_client.upload_blob(f, overwrite=OVERWRITE_OUTPUT)
-                    print("OK", blob.name, "->", target_pdf_name)
-                
+                # Save PDF
+                dest = save_pdf(pdf_path, target_pdf_name, args.local_output, container_client, category)
+                if not fallback:
+                    logger.info(f"OK {category} {category_counts[category]} {blob.name} -> {dest}")
                 processed_count += 1
                 
             except Exception as e:
-                print("ERROR", blob.name, ":", e)
+                logger.error(f"ERROR {blob.name} : {e}")
                 processed_count += 1
 
 
