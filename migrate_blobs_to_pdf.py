@@ -175,6 +175,13 @@ def main():
     # List all blobs for processing
     blobs = list(container_client.list_blobs(name_starts_with=INPUT_PREFIX))
     
+    # Get existing output files (to skip already-converted)
+    existing_outputs = set()
+    if not OVERWRITE_OUTPUT and not args.local_output:
+        logger.info("Loading existing output files...")
+        existing_outputs = {b.name for b in container_client.list_blobs(name_starts_with=OUTPUT_PREFIX)}
+        logger.info(f"Found {len(existing_outputs)} existing output files")
+    
     # Track counts per category
     category_counts = defaultdict(int)
     
@@ -217,16 +224,12 @@ def main():
             relative_path = pathlib.Path(blob.name[len(INPUT_PREFIX):])
             target_pdf_name = OUTPUT_PREFIX + str(relative_path.with_suffix('.pdf'))
             
+            # Skip if already converted
+            if target_pdf_name in existing_outputs:
+                logger.debug(f"SKIP {category} {category_counts[category]} {target_pdf_name} (already exists)")
+                continue
+            
             try:
-                # Skip if Azure target already exists
-                if not args.local_output and not OVERWRITE_OUTPUT:
-                    try:
-                        container_client.get_blob_client(target_pdf_name).get_blob_properties()
-                        logger.debug(f"SKIP {category} {category_counts[category]} {target_pdf_name} (already exists)")
-                        continue
-                    except Exception:
-                        pass  # Doesn't exist, proceed
-                
                 # Download blob
                 downloader = container_client.download_blob(blob.name)
                 with open(local_path, "wb") as f:
