@@ -221,8 +221,12 @@ def main():
             local_path = tmpdir_path / local_name
             
             # Preserve directory structure: replace INPUT_PREFIX with OUTPUT_PREFIX
-            relative_path = pathlib.Path(blob.name[len(INPUT_PREFIX):])
-            target_pdf_name = OUTPUT_PREFIX + str(relative_path.with_suffix('.pdf'))
+            relative_path = blob.name[len(INPUT_PREFIX):]
+            # Change extension to .pdf
+            if '.' in relative_path.split('/')[-1]:
+                target_pdf_name = OUTPUT_PREFIX + relative_path.rsplit('.', 1)[0] + '.pdf'
+            else:
+                target_pdf_name = OUTPUT_PREFIX + relative_path + '.pdf'
             
             # Skip if already converted
             if target_pdf_name in existing_outputs:
