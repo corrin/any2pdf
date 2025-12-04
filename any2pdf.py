@@ -27,6 +27,8 @@ from email import policy
 from email.parser import BytesParser
 from typing import Optional
 
+import filetype
+
 import win32com.client
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
@@ -52,6 +54,28 @@ ALL_SUPPORTED_EXTENSIONS = (
 
 # Edge is typically not in PATH, use standard installation location
 EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+
+# Mapping from MIME types to our extension categories
+MIME_TO_EXTENSION = {
+    # Images
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/tiff': '.tif',
+    'image/bmp': '.bmp',
+    'image/heic': '.heic',
+    'image/heif': '.heic',
+    # Office documents
+    'application/msword': '.doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+    'application/vnd.ms-excel': '.xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+    'application/vnd.ms-powerpoint': '.ppt',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+    # PDF
+    'application/pdf': '.pdf',
+    # Other
+    'application/zip': '.zip',  # Could be .docx/.xlsx/.pptx - needs further check
+}
 
 # Module-level logger
 logger = logging.getLogger(__name__)
@@ -79,6 +103,44 @@ def get_category_for_extension(ext: str) -> str:
     return 'attachment'
 
 
+def detect_extension_by_magic(data: bytes) -> Optional[str]:
+    """
+    Detect file type by magic bytes (file content signature).
+    
+    Args:
+        data: Raw file bytes
+    
+    Returns the detected extension (e.g., '.docx') or None if unknown.
+    """
+    try:
+        kind = filetype.guess(data)
+        if kind is None:
+            return None
+        
+        mime = kind.mime
+        
+        # Handle zip-based Office formats (they all detect as application/zip)
+        if mime == 'application/zip':
+            # Try to determine the actual Office type by inspecting the zip
+            try:
+                with zipfile.ZipFile(io.BytesIO(data), 'r') as zf:
+                    names = zf.namelist()
+                    if any(n.startswith('word/') for n in names):
+                        return '.docx'
+                    elif any(n.startswith('xl/') for n in names):
+                        return '.xlsx'
+                    elif any(n.startswith('ppt/') for n in names):
+                        return '.pptx'
+            except zipfile.BadZipFile:
+                pass
+            return None  # Unknown zip type
+        
+        return MIME_TO_EXTENSION.get(mime)
+    except Exception as e:
+        logger.debug(f"Magic detection failed: {e}")
+        return None
+
+
 def get_password_for_file(path: pathlib.Path) -> Optional[str]:
     """
     Retrieve password for a protected document.
@@ -93,6 +155,41 @@ def get_password_for_file(path: pathlib.Path) -> Optional[str]:
         Password string or None
     """
     return os.environ.get('MIGRATION_DOC_PASSWORD')
+
+
+def is_password_protected(path: pathlib.Path) -> bool:
+    """Check if a file is password protected (without opening in Office)."""
+    ext = path.suffix.lower()
+    
+    # Modern Office formats (.docx, .xlsx, .pptx) - encrypted files aren't valid zips
+    if ext in {'.docx', '.xlsx', '.pptx'}:
+        try:
+            with zipfile.ZipFile(path, 'r') as zf:
+                # If we can list files, it's not encrypted
+                zf.namelist()
+                return False
+        except zipfile.BadZipFile:
+            # Encrypted Office files fail to open as zip
+            return True
+        except Exception:
+            return False
+    
+    # Old Office formats (.doc, .xls, .ppt) - check OLE encryption flag
+    if ext in {'.doc', '.xls', '.ppt'}:
+        try:
+            with open(path, 'rb') as f:
+                header = f.read(512)
+                # OLE compound file signature
+                if header[:8] != b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
+                    return False
+                # Check for encryption - simplified check
+                # Encrypted OLE files have specific markers
+                if b'EncryptedPackage' in header or b'StrongEncryption' in header:
+                    return True
+        except Exception:
+            return False
+    
+    return False
 
 
 def attach_original_to_pdf(pdf_path: pathlib.Path, original_path: pathlib.Path) -> None:
@@ -143,6 +240,11 @@ def _convert_word_to_pdf(
     """Convert Word document to PDF using COM automation."""
     dst_path = dst_dir / f"{src_path.stem}.pdf"
     
+    # Check for password protection before opening Word
+    password = get_password_for_file(src_path)
+    if is_password_protected(src_path) and not password:
+        raise ValueError(f"Password protected file and no password provided: {src_path.name}")
+    
     word = None
     doc = None
     try:
@@ -152,7 +254,6 @@ def _convert_word_to_pdf(
         word.DisplayAlerts = False
         
         # Get password if available
-        password = get_password_for_file(src_path)
         password_args = {'PasswordDocument': password} if password else {}
         
         # Open document
@@ -191,6 +292,11 @@ def _convert_excel_to_pdf(
     """Convert Excel workbook to PDF using COM automation."""
     dst_path = dst_dir / f"{src_path.stem}.pdf"
     
+    # Check for password protection before opening Excel
+    password = get_password_for_file(src_path)
+    if is_password_protected(src_path) and not password:
+        raise ValueError(f"Password protected file and no password provided: {src_path.name}")
+    
     excel = None
     workbook = None
     try:
@@ -200,7 +306,6 @@ def _convert_excel_to_pdf(
         excel.DisplayAlerts = False
         
         # Get password if available
-        password = get_password_for_file(src_path)
         password_args = {'Password': password} if password else {}
         
         # Open workbook
@@ -238,6 +343,11 @@ def _convert_ppt_to_pdf(
     """Convert PowerPoint presentation to PDF using COM automation."""
     dst_path = dst_dir / f"{src_path.stem}.pdf"
     
+    # Check for password protection before opening PowerPoint
+    password = get_password_for_file(src_path)
+    if is_password_protected(src_path) and not password:
+        raise ValueError(f"Password protected file and no password provided: {src_path.name}")
+    
     ppt = None
     presentation = None
     try:
@@ -247,7 +357,6 @@ def _convert_ppt_to_pdf(
         # but we can keep it minimal by not showing windows
         
         # Get password if available
-        password = get_password_for_file(src_path)
         password_args = {'Password': password} if password else {}
         
         # Open presentation
@@ -602,6 +711,15 @@ def convert_anything_to_pdf(
     
     # Get file extension (lowercase)
     ext = src_path.suffix.lower()
+    
+    # If extension is missing or unsupported, try magic detection
+    if ext not in ALL_SUPPORTED_EXTENSIONS:
+        with open(src_path, 'rb') as f:
+            data = f.read()
+        detected_ext = detect_extension_by_magic(data)
+        if detected_ext:
+            logger.info(f"Magic detected '{detected_ext}' for file: {src_path.name}")
+            ext = detected_ext
     
     # Route to appropriate converter
     if ext in PDF_EXTENSIONS:
