@@ -47,10 +47,10 @@ console.setLevel(logging.DEBUG)
 console.setFormatter(logging.Formatter('%(message)s'))
 logger.addHandler(console)
 
-# File: warnings and errors only
-file_handler = logging.FileHandler('migration_issues.log', mode='w')
-file_handler.setLevel(logging.WARNING)
-file_handler.setFormatter(logging.Formatter('%(levelname)s %(message)s'))
+# File: info and above (includes successes)
+file_handler = logging.FileHandler('migration.log', mode='a')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
 logger.addHandler(file_handler)
 
 
