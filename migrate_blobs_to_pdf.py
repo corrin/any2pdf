@@ -54,7 +54,7 @@ file_handler.setFormatter(logging.Formatter('%(levelname)s %(message)s'))
 logger.addHandler(file_handler)
 
 
-def save_pdf(pdf_path, target_name, local_dir, container_client, category):
+def save_pdf(pdf_path, target_name, local_dir, container_client, category, overwrite):
     """Save PDF locally or upload to Azure. Returns destination for logging."""
     if local_dir:
         dest_dir = local_dir / category
@@ -64,7 +64,7 @@ def save_pdf(pdf_path, target_name, local_dir, container_client, category):
         return dest
     client = container_client.get_blob_client(target_name)
     with open(pdf_path, "rb") as f:
-        client.upload_blob(f, overwrite=OVERWRITE_OUTPUT)
+        client.upload_blob(f, overwrite=overwrite)
     return target_name
 
 
@@ -114,6 +114,11 @@ def main():
         type=pathlib.Path,
         default=None,
         help="Write PDFs to local directory instead of uploading to Azure (for testing)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force reprocessing even if output already exists (skips existence check)"
     )
     args = parser.parse_args()
     
@@ -177,10 +182,12 @@ def main():
     
     # Get existing output files (to skip already-converted)
     existing_outputs = set()
-    if not OVERWRITE_OUTPUT and not args.local_output:
+    if not args.force and not OVERWRITE_OUTPUT and not args.local_output:
         logger.info("Loading existing output files...")
         existing_outputs = {b.name for b in container_client.list_blobs(name_starts_with=OUTPUT_PREFIX)}
         logger.info(f"Found {len(existing_outputs)} existing output files")
+    elif args.force:
+        logger.info("Force mode: skipping existence check, will overwrite")
     
     # Track counts per category
     category_counts = defaultdict(int)
@@ -194,6 +201,15 @@ def main():
         for blob in blobs:
             # Skip directory markers
             if blob.name.endswith("/"):
+                continue
+            
+            # Skip zero-byte files (folder markers in Azure)
+            if blob.size == 0:
+                continue
+            
+            # Skip files in excluded directories
+            relative_path = blob.name[len(INPUT_PREFIX):]
+            if relative_path.startswith(('Logs/', 'Mapping Tables/')):
                 continue
             
             # Check max files limit
@@ -253,7 +269,8 @@ def main():
                     fallback = True
                 
                 # Save PDF
-                dest = save_pdf(pdf_path, target_pdf_name, args.local_output, container_client, category)
+                overwrite = args.force or OVERWRITE_OUTPUT
+                dest = save_pdf(pdf_path, target_pdf_name, args.local_output, container_client, category, overwrite)
                 if not fallback:
                     logger.info(f"OK {category} {category_counts[category]} {blob.name} -> {dest}")
                 processed_count += 1
