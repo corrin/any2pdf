@@ -125,6 +125,12 @@ def main():
         action="store_true",
         help="Force reprocessing even if output already exists (skips existence check)"
     )
+    parser.add_argument(
+        "--file-list",
+        type=pathlib.Path,
+        default=None,
+        help="Process only files listed in this text file (one blob path per line, use with --force)"
+    )
     args = parser.parse_args()
     
     # Authenticate with Azure AD
@@ -234,8 +240,29 @@ def main():
 
         return
 
-    # List all blobs for processing
-    blobs = list(container_client.list_blobs(name_starts_with=INPUT_PREFIX))
+    # List blobs for processing - either from file list or full prefix scan
+    if args.file_list:
+        # Read specific files from list
+        logger.info(f"Loading file list from {args.file_list}")
+        with open(args.file_list, 'r', encoding='utf-8') as f:
+            file_list = {line.strip() for line in f if line.strip()}
+        logger.info(f"Loaded {len(file_list)} files to process")
+        
+        # Fetch blob properties for each file in the list
+        blobs = []
+        for blob_name in file_list:
+            try:
+                blob_client = container_client.get_blob_client(blob_name)
+                props = blob_client.get_blob_properties()
+                blobs.append(props)
+            except Exception as e:
+                logger.warning(f"Could not find blob: {blob_name} - {e}")
+        
+        if not args.force:
+            logger.warning("--file-list is typically used with --force to reprocess failed files")
+    else:
+        # Full prefix scan
+        blobs = list(container_client.list_blobs(name_starts_with=INPUT_PREFIX))
     
     # Get existing output files (to skip already-converted)
     existing_outputs = set()
