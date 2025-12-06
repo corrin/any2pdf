@@ -30,10 +30,11 @@ from typing import Optional
 import filetype
 
 import win32com.client
-from PIL import Image
+from PIL import Image, ImageFile
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
+from pillow_heif import register_heif_opener
 
 
 # Supported file extensions by category
@@ -395,6 +396,9 @@ def _convert_image_to_pdf(
     """Convert image to PDF using Pillow."""
     dst_path = dst_dir / f"{src_path.stem}.pdf"
     
+    # Allow loading truncated images
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
+    
     # Open image
     img = Image.open(src_path)
     
@@ -656,6 +660,11 @@ def create_placeholder_pdf(
     # Create PDF content
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
+    
+    # Set metadata to mark as fallback/placeholder
+    c.setAuthor("any2pdf")
+    c.setTitle(f"Placeholder: {src_path.name}")
+    c.setSubject("FALLBACK")
     
     # Add text to the page
     c.setFont("Helvetica", 12)
