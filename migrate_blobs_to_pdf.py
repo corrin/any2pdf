@@ -97,6 +97,11 @@ def main():
         help="Analyse file extensions and show what's supported (doesn't process files)"
     )
     parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show migration progress by comparing source and target file counts"
+    )
+    parser.add_argument(
         "--filter-extension",
         type=str,
         default=None,
@@ -174,9 +179,61 @@ def main():
                 print(f"  - {fname}")
             if len(unsupported_files) > 10:
                 print(f"  ... and {len(unsupported_files) - 10} more")
-        
+
         return
-    
+
+    # Progress mode: compare source and target counts
+    if args.progress:
+        print("Checking migration progress...")
+
+        # Count source files (excluding directories and zero-byte markers)
+        source_files = {}
+        source_by_ext = defaultdict(int)
+        print(f"  Scanning source: {INPUT_PREFIX}")
+        for blob in container_client.list_blobs(name_starts_with=INPUT_PREFIX):
+            if blob.name.endswith("/") or blob.size == 0:
+                continue
+            relative_path = blob.name[len(INPUT_PREFIX):]
+            if relative_path.startswith(('Logs/', 'Mapping Tables/')):
+                continue
+            ext = pathlib.Path(blob.name).suffix.lower()
+            source_by_ext[ext] += 1
+            # Build expected output name
+            if '.' in relative_path.split('/')[-1]:
+                expected_output = OUTPUT_PREFIX + relative_path.rsplit('.', 1)[0] + '.pdf'
+            else:
+                expected_output = OUTPUT_PREFIX + relative_path + '.pdf'
+            source_files[expected_output] = blob.name
+
+        # Count target files
+        target_files = set()
+        print(f"  Scanning target: {OUTPUT_PREFIX}")
+        for blob in container_client.list_blobs(name_starts_with=OUTPUT_PREFIX):
+            if blob.name.endswith("/") or blob.size == 0:
+                continue
+            target_files.add(blob.name)
+
+        # Calculate progress
+        total_source = len(source_files)
+        converted = len(target_files & set(source_files.keys()))
+        remaining = total_source - converted
+        pct = (converted / total_source * 100) if total_source > 0 else 0
+
+        print(f"\nMigration Progress:")
+        print(f"  Source files:    {total_source:,}")
+        print(f"  Converted:       {converted:,}")
+        print(f"  Remaining:       {remaining:,}")
+        print(f"  Progress:        {pct:.1f}%")
+
+        # Show breakdown by extension
+        print(f"\nBy extension:")
+        for ext in sorted(source_by_ext.keys()):
+            count = source_by_ext[ext]
+            status = "supported" if ext in ALL_SUPPORTED_EXTENSIONS else "UNSUPPORTED"
+            print(f"  {ext or '(none)':>10}: {count:>6} ({status})")
+
+        return
+
     # List all blobs for processing
     blobs = list(container_client.list_blobs(name_starts_with=INPUT_PREFIX))
     
